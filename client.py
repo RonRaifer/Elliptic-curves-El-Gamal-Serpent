@@ -174,9 +174,6 @@ class ClientSender(Thread):
                         length = json_packet['length']
                         b_msg = bytes().fromhex(json_packet['message'])
                         decrypted_message = serp.decrypt(b_msg, self.priv_key)[16 - length:]
-                        print(f"{json_packet['hash']} "
-                              f"{'==' if json_packet['hash'] == hash(decrypted_message) else '!='} "
-                              f"{hash(decrypted_message)}")
                         self.msg_list.insert(tkinter.END, f"{name}: {decrypted_message}")
             except UnicodeDecodeError as e:
                 decrypted_message = bytes().fromhex(json_packet['message']).decode('utf8', errors='replace')
