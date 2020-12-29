@@ -20,9 +20,8 @@ class Serpent:
             loop = len(key) // 32 + 1
             key = b'\x00' * (32 - len(key) % 32) + key
             t_key = [key[32 * i:32 * (i + 1)] for i in range(loop)]
-            key = reduce(lambda x, y: b''.join([int(i ^ j).to_bytes(1, 'big', signed=False) for i, j in zip(x, y)]),
-                         t_key)
-
+            key = reduce(lambda x, y: b''.join([int(i ^ j)
+                                               .to_bytes(1, 'big', signed=False) for i, j in zip(x, y)]), t_key)
         elif len(key) != 32:
             space = 8 * (32 - len(key)) - 1
         key = int.from_bytes(key, 'big', signed=False)
@@ -73,6 +72,8 @@ class Serpent:
 
     @staticmethod
     def encrypt(block: bytes, key: Union[str, bytes]) -> bytes:
+        block = block.zfill(16)
+
         if len(block) != 16:
             raise LenError(16, len(block))
 
@@ -88,7 +89,7 @@ class Serpent:
         return b.to_bytes(16, 'big', signed=False)
 
     @staticmethod
-    def decrypt(block: bytes, key: Union[str, bytes]) -> bytes:
+    def decrypt(block: bytes, key: Union[str, bytes]) -> str:
         if len(block) != 16:
             raise LenError(16, len(block))
 
@@ -101,11 +102,14 @@ class Serpent:
             b = Serpent.inverse_linear_transform_bitwise(b)
             b = Serpent.s_box(i % 8, b, 128, inverse=True) ^ keys[i]
 
-        return b.to_bytes(16, 'big', signed=False)
+        decrypted_str = b.to_bytes(16, 'big', signed=False).decode('utf8')
+        return decrypted_str
 
     @staticmethod
     def linear_transform_bitwise(b: int) -> int:
-        x0, x1, x2, x3 = (b >> 3 * 32) & 0xffffffff, (b >> 2 * 32) & 0xffffffff, (b >> 32) & 0xffffffff, \
+        x0, x1, x2, x3 = (b >> 3 * 32) & 0xffffffff, \
+                         (b >> 2 * 32) & 0xffffffff, \
+                         (b >> 32) & 0xffffffff, \
                          b & 0xffffffff
         x0 = l_move32(x0, 13)
         x2 = l_move32(x2, 3)
@@ -122,7 +126,9 @@ class Serpent:
 
     @staticmethod
     def inverse_linear_transform_bitwise(b: int) -> int:
-        x0, x1, x2, x3 = (b >> 3 * 32) & 0xffffffff, (b >> 2 * 32) & 0xffffffff, (b >> 32) & 0xffffffff, \
+        x0, x1, x2, x3 = (b >> 3 * 32) & 0xffffffff, \
+                         (b >> 2 * 32) & 0xffffffff, \
+                         (b >> 32) & 0xffffffff, \
                          b & 0xffffffff
         x2 = r_move32(x2, 22)
         x0 = r_move32(x0, 5)
@@ -190,12 +196,13 @@ def permutation(num: int, perm: Union[List]) -> int:
 
 if __name__ == '__main__':
     # Serpent usage example
-    s_key = "some_key"
+    s_key = "key"
     cipher = Serpent()
-    message = "message"
+    message = "message007"
+    message = f"{len(message)}:{message}"
     print("Message:", message)
-    encrypted = cipher.encrypt(bytes(message.encode('utf8')).zfill(16), s_key)
-    print("Encryption", encrypted.decode('utf8', errors='replace'))
+    encrypted = cipher.encrypt(bytes(message.encode('utf8')), s_key)
+    print("Encryption:", encrypted.decode('utf8', errors='replace'))
     decrypted = cipher.decrypt(encrypted, s_key)
-    print("Decryption", decrypted.decode('utf8').replace('0', ''))
+    print("Decryption:", decrypted)
     print("")

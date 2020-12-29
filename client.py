@@ -1,21 +1,38 @@
+import os
 import sys
 import getopt
 import socket
+import threading
 import tkinter
 import hashlib
-from threading import Thread
+import json
+
+from ecc import ECPoint
+from elgamal import ElGamal as eg
+from serpent import Serpent as serp
+from threading import Thread, Event
+
+Return = "<Return>"
 
 class ClientSender(Thread):
     def __init__(self, client, target, port):
         Thread.__init__(self)
+        self.port = port
         self.client = client
         self.target = target
-        self.logged = False
-        self.port = port
-        self.top = None
+        self.elgamal = eg()
+        self.serpent = serp()
+        self.first = False
         self.screen = None
         self.my_msg = None
+        self.priv_key = None
         self.msg_list = None
+        self.username = None
+        self.key_flag = Event()
+        self.chat_flag = Event()
+        self.login_flag = Event()
+
+        Thread(target=self.receiver).start()
         self.login_window()
 
     def run(self):
@@ -27,40 +44,12 @@ class ClientSender(Thread):
             print('[!] Exception! Exiting...')
             self.client.close()
 
-    def receive(self):
-        while True:
-            message = self.client.recv(1024).decode()
-            self.msg_list.insert(tkinter.END, message)
-
-    def send_msg(self, event=None):
-        """Handles sending of messages."""
-        msg = self.my_msg.get()
-        self.my_msg.set("")  # Clears input field.
-        self.client.send(bytes(msg, "utf8"))
-
-    def login_verify(self, event=None):
-        username1 = username_verify.get()
-        password1 = password_verify.get()
-        username_field.delete(0, tkinter.END)
-        password_field.delete(0, tkinter.END)
-        h = hashlib.sha256()
-        h.update(password1.encode('utf-8'))
-        print(h.hexdigest())
-        password1 = h.hexdigest()
-        self.client.send(bytes(f"{username1}:{password1}", 'utf8'))
-        srv_msg = self.client.recv(1024).decode()
-        self.logged = srv_msg[:9] == "{granted}"
-        if self.logged:
-            self.screen.destroy()
-            self.chat_window(srv_msg[9:])
-        else:
-            print(srv_msg)
-
     def login_window(self):
-        global username_verify, password_verify, username_field, password_field
+        global username_verify, password_verify, username_field, password_field  # , key_field, key_verify
         self.screen = tkinter.Tk()
         self.screen.geometry("280x150")
         self.screen.title("CRYPT0CH4T Login")
+        self.screen.protocol("WM_DELETE_WINDOW", self.on_closing)
         tkinter.Label(self.screen, text="Please enter details below to login").pack()
         username_verify = tkinter.StringVar()
         password_verify = tkinter.StringVar()
@@ -70,15 +59,169 @@ class ClientSender(Thread):
         tkinter.Label(self.screen, text="Password * ").pack()
         password_field = tkinter.Entry(self.screen, textvariable=password_verify, show='*')
         password_field.pack()
-        password_field.bind("<Return>", self.login_verify)
-        tkinter.Button(self.screen, text="Login", width=10, height=1, command=self.login_verify).pack()
+        password_field.bind(Return, self.login_verifier)
+        tkinter.Label(self.screen).pack()
+        tkinter.Button(self.screen, text="Login", width=10, height=1, command=self.login_verifier).pack()
         tkinter.mainloop()
 
-    def chat_window(self, srv_msg):
-        self.top = tkinter.Tk()
-        self.top.title("CRYPT0CH4T")
-        self.top.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.screen = tkinter.Frame(self.top)
+    def login_verifier(self, event=None):
+        self.username = username_verify.get()
+        username_field.delete(0, tkinter.END)
+        password1 = password_verify.get()
+        h = hashlib.sha256()
+        h.update(password1.encode())
+        password1 = h.hexdigest()
+        password_field.delete(0, tkinter.END)
+        self.sender({
+            "message": "details",
+            "username": self.username,
+            "password": password1
+        })
+        self.login_flag.wait(timeout=15)
+        self.login_flag.clear()
+        self.screen.destroy()
+        if self.first:
+            self.key_window()
+        else:
+            self.chat_window()
+
+    def key_verifier(self, event=None):
+        self.priv_key = key_verify.get()
+        key_field.delete(0, tkinter.END)
+        self.key_flag.wait(timeout=15)
+        self.key_flag.clear()
+        self.screen.destroy()
+        self.chat_window()
+
+    def key_window(self):
+        global key_verify, key_field
+        self.screen = tkinter.Tk()
+        self.screen.geometry("280x150")
+        self.screen.title("CRYPT0CH4T Key setup")
+        self.screen.protocol("WM_DELETE_WINDOW", self.on_closing)
+        tkinter.Label(self.screen, text="Please enter details for encryption").pack()
+        key_verify = tkinter.StringVar()
+        tkinter.Label(self.screen, text="Encryption key * ").pack()
+        key_field = tkinter.Entry(self.screen, textvariable=key_verify)
+        key_field.pack()
+        key_field.bind(Return, self.key_verifier)
+        tkinter.Label(self.screen).pack()
+        tkinter.Button(self.screen, text="Set key", width=10, height=1, command=self.key_verifier).pack()
+        tkinter.mainloop()
+
+    def sender(self, message):
+        self.client.send(bytes(json.dumps(message).encode()))
+
+    def receiver(self):
+        json_packet = {
+            "message": bytes("Empty default message", encoding='utf8').hex()
+        }
+        while True:
+            try:
+                message = self.client.recv(1024).decode()
+                if len(message) == 0:
+                    raise NotImplementedError
+                # 1) Split messages on packets
+                for str_packet in message.split("}{"):
+                    print(str_packet)
+                    if not str_packet.endswith('}'):
+                        str_packet += '}'
+                    if str_packet[0] != '{':
+                        str_packet = '{' + str_packet
+                    json_packet = json.loads(str_packet)
+                    if json_packet["from"] == "server":
+                        # 2) Login step
+                        if json_packet['message'] == '{provide}':
+                            self.first = json_packet["first"]
+                            # 1.1) User sends his public part of ECC to others
+                            self.sender({
+                                "message": "{multiplier}",
+                                "EGn": self.elgamal.n
+                            })
+                            if self.first:
+                                self.login_flag.set()
+                        # 3) Others receive your key from server
+                        elif json_packet['message'] == "{ecc-key}":
+                            self.elgamal.keygen(json_packet["EGn"])
+                        # 3) On granted you receive a whole previous public key w\ your part
+                        elif json_packet['message'] == "{granted}":
+                            self.elgamal.keygen(json_packet["EGn"])
+                            self.key_flag.set()
+                            self.login_flag.set()
+                        # 4) Receive encrypted key for chat and try to decrypt
+                        elif json_packet['message'] == "{secret key}":
+                            ECP = ECPoint(json_packet['ECPoint']['x'],
+                                          json_packet['ECPoint']['y'],
+                                          json_packet['ECPoint']['inf'])
+                            self.priv_key = bytes().fromhex(json_packet['key'])
+                            self.priv_key = self.elgamal.decrypt((ECP, self.priv_key)).decode()
+                        # 5) Everyone got message about new client
+                        else:
+                            if json_packet["message"].split()[0] == "Welcome":
+                                if self.first and json_packet["message"].split()[2] != f"{self.username}!":
+                                    self.encrypt_and_send()
+                                while not self.chat_flag.is_set():
+                                    continue
+                            if self.chat_flag.is_set():
+                                self.msg_list.insert(tkinter.END, json_packet['message'])
+                            else:
+                                print(str_packet)
+                            if json_packet["message"].split()[1] == "left":
+                                raise ConnectionAbortedError
+                    else:
+                        name = json_packet['from']
+                        json_packet = json.loads(bytes().fromhex(json_packet['message']).decode())
+                        length = json_packet['length']
+                        b_msg = bytes().fromhex(json_packet['message'])
+                        decrypted_message = serp.decrypt(b_msg, self.priv_key)[16 - length:]
+                        print(f"{json_packet['hash']} "
+                              f"{'==' if json_packet['hash'] == hash(decrypted_message) else '!='} "
+                              f"{hash(decrypted_message)}")
+                        self.msg_list.insert(tkinter.END, f"{name}: {decrypted_message}")
+            except UnicodeDecodeError as e:
+                decrypted_message = bytes().fromhex(json_packet['message']).decode('utf8', errors='replace')
+                self.msg_list.insert(tkinter.END, f"{json_packet['from']}: {decrypted_message}")
+            except json.decoder.JSONDecodeError as e:
+                print(e, json_packet)
+            except (ConnectionError, NotImplementedError) as e:
+                self.client.close()
+                exit()
+
+    def encrypt_and_send(self):
+        # 1) Prepare serpent key for sending
+        key = self.priv_key.encode('utf8')
+        # 2) Encrypt with elgamal ecc
+        key = self.elgamal.encrypt(key)
+        # 3) Send to the server with public key part
+        self.sender({
+            "message": "{secret key}",  # message
+            "ECPoint": {    # Encrypted serpent key
+                "x": key[0].x,
+                "y": key[0].y,
+                "inf": key[0].inf
+            },
+            "key": key[1].hex()
+        })
+
+    def safety_sender(self, event=None):
+        """Handles sending of messages."""
+        # 1) Cut message, serpent doesn't support long messages
+        message = self.my_msg.get()[:16].encode()
+        # 2) Build packet with length, msg and it's hash
+        packet = json.dumps({
+            "length": len(message),
+            "message": serp.encrypt(bytes(message), self.priv_key).hex(),
+            "hash":  hash(message)
+        }).encode()
+        # 3) Clear input field and send
+        self.my_msg.set("")
+        self.client.send(packet)
+
+    def chat_window(self):
+        self.screen = tkinter.Tk()
+        self.screen.title("CRYPT0CH4T")
+        self.screen.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.screen = tkinter.Frame(self.screen)
         self.my_msg = tkinter.StringVar()  # For the messages to be sent.
         self.my_msg.set("Type your messages here.")
         scrollbar = tkinter.Scrollbar(self.screen)  # To navigate through past messages.
@@ -88,23 +231,18 @@ class ClientSender(Thread):
         self.msg_list.pack(side=tkinter.LEFT, fill=tkinter.BOTH)
         self.msg_list.pack()
         self.screen.pack()
-        entry_field = tkinter.Entry(self.top, textvariable=self.my_msg, width=55, font=10, bd=5)
-        entry_field.bind("<Return>", self.send_msg)
+        entry_field = tkinter.Entry(textvariable=self.my_msg, width=55, font=10, bd=5)
+        entry_field.bind(Return, self.safety_sender)
         entry_field.pack()
-        Thread(target=self.receive).start()
-        if len(srv_msg) > 1:
-            self.msg_list.insert(tkinter.END, srv_msg)
+        self.chat_flag.set()
         tkinter.mainloop()
 
     def on_closing(self, event=None):
         """This function is to be called when the window is closed."""
-        self.my_msg.set("{quit}")
-        self.send_msg()
-        print(self.client.recv(1024).decode())
         self.client.close()
         self.screen.destroy()
-        self.top.destroy()
-        sys.exit()
+        quit()
+
 
 def usage():
     print("-h --help                    Invoke this help page")
